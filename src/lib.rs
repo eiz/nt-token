@@ -70,6 +70,7 @@ fn buffer_probe(res: Result<()>) -> Result<()> {
 
 /// RAII owner for a Windows access‑token `HANDLE`.
 #[derive(Debug)]
+#[repr(transparent)]
 pub struct OwnedToken {
     handle: HANDLE,
 }
@@ -83,22 +84,6 @@ impl OwnedToken {
             Ok(Self { handle: h })
         }
     }
-
-    /// Duplicate the token with the desired access mask.
-    pub fn duplicate(&self, access: TOKEN_ACCESS_MASK) -> Result<Self> {
-        self.as_token().duplicate(access)
-    }
-
-    /// Borrow as a [`TokenRef`] (explicit form).
-    #[inline]
-    pub fn as_token(&self) -> &TokenRef {
-        self
-    }
-
-    /// Expose raw handle (valid for lifetime of `self`).
-    pub fn handle(&self) -> HANDLE {
-        self.handle
-    }
 }
 
 impl Drop for OwnedToken {
@@ -107,12 +92,9 @@ impl Drop for OwnedToken {
     }
 }
 
-/* Deref glue – turns `&OwnedToken` into `&TokenRef` with zero‑cost cast. */
 impl Deref for OwnedToken {
     type Target = TokenRef;
     fn deref(&self) -> &Self::Target {
-        // SAFETY: `TokenRef` is `#[repr(transparent)]` over `HANDLE`, and the *only* field of
-        // `OwnedToken` is the same `HANDLE` at offset 0.
         unsafe { &*(self as *const OwnedToken as *const TokenRef) }
     }
 }
