@@ -1,8 +1,8 @@
 use nt_token::{Group, OwnedToken, Privilege, Sid, Token};
 use windows::{
     Win32::Security::{
-        TOKEN_ADJUST_PRIVILEGES, TOKEN_DUPLICATE, TOKEN_QUERY, TokenImpersonation,
-        WinBuiltinAdministratorsSid,
+        CREATE_RESTRICTED_TOKEN_FLAGS, DISABLE_MAX_PRIVILEGE, TOKEN_ADJUST_PRIVILEGES,
+        TOKEN_DUPLICATE, TOKEN_QUERY, TokenImpersonation, WinBuiltinAdministratorsSid,
     },
     core::Result,
 };
@@ -115,5 +115,23 @@ fn current_process_token_info() -> Result<()> {
     }
 
     impersonation.adjust_privileges(&[Privilege::enabled("SeIncreaseWorkingSetPrivilege")?])?;
+    Ok(())
+}
+
+#[test]
+fn restricted_token() -> Result<()> {
+    let tok = OwnedToken::from_current_process(TOKEN_QUERY | TOKEN_DUPLICATE)?
+        .duplicate(TOKEN_QUERY | TOKEN_DUPLICATE, TokenImpersonation)?;
+    let linked = tok.linked_token()?;
+    let restricted = linked.create_restricted_token(
+        DISABLE_MAX_PRIVILEGE,
+        &[Group::disabled(Sid::well_known(
+            WinBuiltinAdministratorsSid,
+        )?)],
+        &[],
+        &[],
+    )?;
+    println!("=== New Restricted Token ===");
+    print_token_info(&restricted)?;
     Ok(())
 }

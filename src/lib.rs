@@ -33,24 +33,28 @@ use windows::{
             GetLastError, HANDLE, HLOCAL, LUID, LocalFree,
         },
         Security::{
-            AdjustTokenPrivileges, AllocateAndInitializeSid,
+            AdjustTokenGroups, AdjustTokenPrivileges, AllocateAndInitializeSid,
             Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW},
-            CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, FreeSid, GetLengthSid,
-            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid,
-            IsWellKnownSid, LUID_AND_ATTRIBUTES, LookupAccountSidW, LookupPrivilegeNameW,
-            LookupPrivilegeValueW, PSID, SE_PRIVILEGE_ENABLED, SE_PRIVILEGE_REMOVED,
-            SECURITY_NT_AUTHORITY, SID_IDENTIFIER_AUTHORITY, SID_NAME_USE, SecurityImpersonation,
-            TOKEN_ACCESS_MASK, TOKEN_APPCONTAINER_INFORMATION, TOKEN_ELEVATION,
-            TOKEN_ELEVATION_TYPE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN,
-            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE,
-            TOKEN_USER, TokenAppContainerNumber, TokenAppContainerSid, TokenCapabilities,
-            TokenDeviceGroups, TokenElevation, TokenElevationType, TokenGroups,
-            TokenHasRestrictions, TokenIntegrityLevel, TokenIsAppContainer, TokenLinkedToken,
-            TokenLogonSid, TokenOwner, TokenPrimary, TokenPrimaryGroup, TokenPrivileges,
-            TokenRestrictedDeviceGroups, TokenRestrictedSids, TokenType, TokenUIAccess, TokenUser,
-            TokenVirtualizationAllowed, TokenVirtualizationEnabled, WELL_KNOWN_SID_TYPE,
+            CREATE_RESTRICTED_TOKEN_FLAGS, CheckTokenMembership, CreateRestrictedToken,
+            CreateWellKnownSid, DuplicateTokenEx, FreeSid, GetLengthSid, GetSidSubAuthority,
+            GetSidSubAuthorityCount, GetTokenInformation, IsValidSid, IsWellKnownSid,
+            LUID_AND_ATTRIBUTES, LookupAccountSidW, LookupPrivilegeNameW, LookupPrivilegeValueW,
+            PSID, SE_PRIVILEGE_ENABLED, SE_PRIVILEGE_REMOVED, SECURITY_NT_AUTHORITY,
+            SID_IDENTIFIER_AUTHORITY, SID_NAME_USE, SecurityImpersonation, TOKEN_ACCESS_MASK,
+            TOKEN_APPCONTAINER_INFORMATION, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS,
+            TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
+            TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE, TOKEN_USER, TokenAppContainerNumber,
+            TokenAppContainerSid, TokenCapabilities, TokenDeviceGroups, TokenElevation,
+            TokenElevationType, TokenGroups, TokenHasRestrictions, TokenIntegrityLevel,
+            TokenIsAppContainer, TokenLinkedToken, TokenLogonSid, TokenOwner, TokenPrimary,
+            TokenPrimaryGroup, TokenPrivileges, TokenRestrictedDeviceGroups, TokenRestrictedSids,
+            TokenType, TokenUIAccess, TokenUser, TokenVirtualizationAllowed,
+            TokenVirtualizationEnabled, WELL_KNOWN_SID_TYPE,
         },
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
+        System::{
+            SystemServices::SE_GROUP_ENABLED,
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
     },
     core::{BOOL, Error, HSTRING, PCWSTR, PWSTR, Result},
 };
@@ -62,6 +66,10 @@ fn buffer_probe(res: Result<()>) -> Result<()> {
         Err(e) if e.code() == ERROR_INSUFFICIENT_BUFFER.to_hresult() => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+fn nonempty_slice<T>(slice: &[T]) -> Option<&[T]> {
+    if slice.is_empty() { None } else { Some(slice) }
 }
 
 /* ------------------------------------------------------------------------- */
@@ -497,6 +505,91 @@ impl Token {
     pub fn app_container_number(&self) -> Result<u32> {
         self.dword_info(TokenAppContainerNumber)
     }
+
+    /// Adjust multiple group states in one go. The token must have
+    /// `TOKEN_ADJUST_GROUPS` access. Each `Group` instance specifies the
+    /// desired attribute flags for an existing SID in the token. For
+    /// example, to enable a group, include the `SE_GROUP_ENABLED` attribute;
+    /// to disable it, omit that flag. Analogous to `adjust_privileges`.
+    pub fn adjust_groups(&self, groups: &[Group]) -> Result<()> {
+        if groups.is_empty() {
+            return Ok(());
+        }
+
+        unsafe {
+            let sid_attrs = Self::sid_attr_vec(groups);
+            let count = sid_attrs.len();
+
+            // Compute total size for TOKEN_GROUPS buffer.
+            let buf_len = std::mem::size_of::<TOKEN_GROUPS>()
+                + (count - 1) * std::mem::size_of::<windows::Win32::Security::SID_AND_ATTRIBUTES>();
+
+            let usize_slots =
+                (buf_len + std::mem::size_of::<usize>() - 1) / std::mem::size_of::<usize>();
+            let mut buf: Vec<usize> = vec![0; usize_slots];
+
+            let tg_ptr = buf.as_mut_ptr() as *mut TOKEN_GROUPS;
+
+            (*tg_ptr).GroupCount = count as u32;
+
+            let sa_ptr = (*tg_ptr).Groups.as_mut_ptr();
+            std::ptr::copy_nonoverlapping(sid_attrs.as_ptr(), sa_ptr, count);
+
+            AdjustTokenGroups(self.handle, false, Some(&*tg_ptr), 0, None, None)?;
+
+            if GetLastError() == ERROR_NOT_ALL_ASSIGNED {
+                return Err(Error::from_win32());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Internal helper: build a Vec<SID_AND_ATTRIBUTES> pointing at the SIDs
+    /// owned by the provided `Group` slice. The returned vector keeps the
+    /// pointers valid for the lifetime of the vector.
+    fn sid_attr_vec(groups: &[Group]) -> Vec<windows::Win32::Security::SID_AND_ATTRIBUTES> {
+        groups
+            .iter()
+            .map(|g| windows::Win32::Security::SID_AND_ATTRIBUTES {
+                Sid: PSID(g.sid.buf.as_ptr() as *mut _),
+                Attributes: g.attributes(),
+            })
+            .collect()
+    }
+
+    /// Create a restricted token derived from this token.
+    /// `flags` is a bitmask of `CREATE_RESTRICTED_TOKEN_*` constants (e.g.
+    /// `DISABLE_MAX_PRIVILEGE`). The various slices correspond to the
+    /// parameters of the Win32 `CreateRestrictedToken` API.
+    pub fn create_restricted_token(
+        &self,
+        flags: CREATE_RESTRICTED_TOKEN_FLAGS,
+        sids_to_disable: &[Group],
+        privileges_to_delete: &[Privilege],
+        sids_to_restrict: &[Group],
+    ) -> Result<OwnedToken> {
+        unsafe {
+            // Build SID_AND_ATTRIBUTES buffers.
+            let disable_vec = Self::sid_attr_vec(sids_to_disable);
+            let restrict_vec = Self::sid_attr_vec(sids_to_restrict);
+            // Build LUID_AND_ATTRIBUTES array for privileges.
+            let priv_vec: Vec<LUID_AND_ATTRIBUTES> =
+                privileges_to_delete.iter().map(|p| p.inner).collect();
+            let mut new_tok = HANDLE::default();
+
+            CreateRestrictedToken(
+                self.handle,
+                flags,
+                nonempty_slice(&disable_vec),
+                nonempty_slice(&priv_vec),
+                nonempty_slice(&restrict_vec),
+                &mut new_tok,
+            )?;
+
+            Ok(OwnedToken { handle: new_tok })
+        }
+    }
 }
 
 impl<'a> From<&'a OwnedToken> for Token {
@@ -712,6 +805,26 @@ impl Group {
     /// Convenience helper – resolve account/domain names (delegates to the SID).
     pub fn account(&self) -> Result<(String, String)> {
         self.sid.account()
+    }
+
+    /// Construct a group specification from a `Sid` and an explicit
+    /// attribute mask (see `SE_GROUP_*`). This gives you full control over the
+    /// `SID_AND_ATTRIBUTES::Attributes` field that will be passed to
+    /// `AdjustTokenGroups`.
+    pub fn new(sid: Sid, attributes: u32) -> Self {
+        Self { sid, attributes }
+    }
+
+    /// Convenience constructor: create an enabled group specification
+    /// (`SE_GROUP_ENABLED`).
+    pub fn enabled(sid: Sid) -> Self {
+        Self::new(sid, SE_GROUP_ENABLED as u32)
+    }
+
+    /// Convenience constructor: create a disabled group specification
+    /// (no attributes set).
+    pub fn disabled(sid: Sid) -> Self {
+        Self::new(sid, 0)
     }
 }
 
