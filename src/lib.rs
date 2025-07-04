@@ -506,9 +506,9 @@ impl Sid {
         unsafe {
             let mut pwstr = PWSTR::null();
             ConvertSidToStringSidW(PSID(self.buf.as_ptr() as *mut c_void), &mut pwstr)?;
-            let s = pwstr.to_string()?;
+            let s = pwstr.to_string();
             LocalFree(Some(HLOCAL(pwstr.0 as *mut c_void)));
-            Ok(s)
+            Ok(s?)
         }
     }
 
