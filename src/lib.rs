@@ -37,16 +37,21 @@
 use std::{ffi::c_void, ops::Deref};
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HLOCAL, LUID, LocalFree, PSID},
+        Foundation::{
+            CloseHandle, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, HLOCAL, LUID, LocalFree,
+            PSID,
+        },
         Security::{
+            AdjustTokenPrivileges,
             Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW},
             CreateWellKnownSid, DuplicateTokenEx, GetLengthSid, GetSidSubAuthority,
             GetSidSubAuthorityCount, GetTokenInformation, LUID_AND_ATTRIBUTES, LookupAccountSidW,
-            LookupPrivilegeNameW, SE_PRIVILEGE_ENABLED, SID_NAME_USE, SecurityImpersonation,
-            TOKEN_ACCESS_MASK, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS,
-            TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_USER,
-            TokenElevation, TokenElevationType, TokenGroups, TokenIntegrityLevel, TokenLinkedToken,
-            TokenPrimary, TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
+            LookupPrivilegeNameW, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+            SE_PRIVILEGE_REMOVED, SID_NAME_USE, SecurityImpersonation, TOKEN_ACCESS_MASK,
+            TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS, TOKEN_LINKED_TOKEN,
+            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_USER, TokenElevation,
+            TokenElevationType, TokenGroups, TokenIntegrityLevel, TokenLinkedToken, TokenPrimary,
+            TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
@@ -179,7 +184,7 @@ impl Token {
     }
 
     /// Enumerate group SIDs.
-    pub fn groups(&self) -> Result<Vec<Sid>> {
+    pub fn groups(&self) -> Result<Vec<Group>> {
         unsafe {
             let mut len = 0u32;
             // Probe for required buffer length (an insufficient-buffer error is expected).
@@ -201,7 +206,15 @@ impl Token {
             let groups = &*(buf.as_ptr() as *const TOKEN_GROUPS);
             let slice =
                 std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize);
-            slice.iter().map(|ga| Sid::from_ptr(ga.Sid)).collect()
+            slice
+                .iter()
+                .map(|ga| {
+                    Ok(Group {
+                        sid: Sid::from_ptr(ga.Sid)?,
+                        attributes: ga.Attributes,
+                    })
+                })
+                .collect()
         }
     }
 
@@ -294,6 +307,50 @@ impl Token {
 
             Ok(slice.iter().map(|la| Privilege::from_raw(la)).collect())
         }
+    }
+
+    /// Adjust multiple privileges in one go. The token must have
+    /// `TOKEN_ADJUST_PRIVILEGES` access. Each `Privilege` decides whether
+    /// it should be enabled (`Privilege::new(name, true)`) or disabled
+    /// (`Privilege::new(name, false)`).
+    pub fn adjust_privileges(&self, privs: &[Privilege]) -> Result<()> {
+        if privs.is_empty() {
+            return Ok(());
+        }
+
+        unsafe {
+            // Allocate a variable-length TOKEN_PRIVILEGES buffer.
+            let count = privs.len();
+            let buf_len = std::mem::size_of::<TOKEN_PRIVILEGES>()
+                + (count - 1) * std::mem::size_of::<LUID_AND_ATTRIBUTES>();
+            let mut buf = vec![0u8; buf_len];
+
+            // Write PrivilegeCount.
+            *(buf.as_mut_ptr() as *mut u32) = count as u32;
+
+            // Pointer to the first LUID_AND_ATTRIBUTES entry.
+            let la_ptr =
+                buf.as_mut_ptr().add(std::mem::size_of::<u32>()) as *mut LUID_AND_ATTRIBUTES;
+
+            for (i, p) in privs.iter().enumerate() {
+                *la_ptr.add(i) = LUID_AND_ATTRIBUTES {
+                    Luid: p.luid,
+                    Attributes: if p.is_enabled() {
+                        SE_PRIVILEGE_ENABLED
+                    } else {
+                        SE_PRIVILEGE_REMOVED
+                    },
+                };
+            }
+
+            let tp_ptr = buf.as_ptr() as *const TOKEN_PRIVILEGES;
+
+            AdjustTokenPrivileges(self.handle, false, Some(&*tp_ptr), 0, None, None)?;
+            if GetLastError() == ERROR_NOT_ALL_ASSIGNED {
+                return Err(Error::from_win32());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -438,6 +495,41 @@ impl std::fmt::Display for Sid {
 }
 
 /* ------------------------------------------------------------------------- */
+/* Group                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/// Token group entry – SID plus its attribute flags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    sid: Sid,
+    attributes: u32,
+}
+
+impl Group {
+    /// Borrow the underlying SID.
+    pub fn sid(&self) -> &Sid {
+        &self.sid
+    }
+
+    /// Raw attribute flags (see `SE_GROUP_*`).
+    pub fn attributes(&self) -> u32 {
+        self.attributes
+    }
+
+    /// Convenience helper – resolve account/domain names (delegates to the SID).
+    pub fn account(&self) -> Result<(String, String)> {
+        self.sid.account()
+    }
+}
+
+impl std::fmt::Display for Group {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Delegate to the SID's `Display` impl for concise output.
+        write!(f, "{}", self.sid)
+    }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Privilege                                                                 */
 /* ------------------------------------------------------------------------- */
 
@@ -489,6 +581,36 @@ impl Privilege {
     /// Is this privilege currently enabled?
     pub fn is_enabled(&self) -> bool {
         self.attributes & SE_PRIVILEGE_ENABLED.0 != 0
+    }
+
+    /// Construct a privilege specification by name and desired enabled state.
+    /// `name` is the textual privilege name (e.g. `"SeDebugPrivilege"`).
+    pub fn new(name: &str, enable: bool) -> Result<Self> {
+        unsafe {
+            // Resolve the privilege's LUID.
+            let mut luid = LUID::default();
+            let mut wide: Vec<u16> = name.encode_utf16().collect();
+            wide.push(0); // trailing NUL
+
+            LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wide.as_ptr()), &mut luid)?;
+
+            Ok(Self {
+                luid,
+                attributes: if enable { SE_PRIVILEGE_ENABLED.0 } else { 0 },
+            })
+        }
+    }
+
+    /// Convenience constructor: create an enabled privilege specification
+    /// (equivalent to `Privilege::new(name, true)`).
+    pub fn enabled(name: &str) -> Result<Self> {
+        Self::new(name, true)
+    }
+
+    /// Convenience constructor: create a disabled privilege specification
+    /// (equivalent to `Privilege::new(name, false)`).
+    pub fn disabled(name: &str) -> Result<Self> {
+        Self::new(name, false)
     }
 }
 

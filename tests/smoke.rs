@@ -1,5 +1,8 @@
-use nt_token::OwnedToken;
-use windows::{Win32::Security::TOKEN_QUERY, core::Result};
+use nt_token::{OwnedToken, Privilege};
+use windows::{
+    Win32::Security::{TOKEN_ADJUST_PRIVILEGES, TOKEN_QUERY},
+    core::Result,
+};
 
 // Simple smoke-test: open the current process token and print some data. If
 // anything panics or returns an `Err`, the test will fail.
@@ -13,7 +16,8 @@ fn print_token_info(tok: &OwnedToken) -> Result<()> {
 
     for g in tok.groups()? {
         let (name, domain) = g.account()?;
-        println!("group      -> {g} ({domain}\\{name})");
+        let attrs = g.attributes();
+        println!("group      -> {g} ({domain}\\{name}) ({attrs:08x})");
     }
 
     for p in tok.privileges()? {
@@ -25,7 +29,7 @@ fn print_token_info(tok: &OwnedToken) -> Result<()> {
 
 #[test]
 fn current_process_token_info() -> Result<()> {
-    let tok = OwnedToken::from_current_process(TOKEN_QUERY)?;
+    let tok = OwnedToken::from_current_process(TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES)?;
     println!("=== Current Process Token ===");
     print_token_info(&tok)?;
 
@@ -35,10 +39,10 @@ fn current_process_token_info() -> Result<()> {
             print_token_info(&linked)?;
         }
         Err(e) => {
-            // It's perfectly valid for a token to have no linked token (e.g. not a filtered admin token).
             println!("\n(no linked token: {e:?})");
         }
     }
 
+    tok.adjust_privileges(&[Privilege::enabled("SeIncreaseWorkingSetPrivilege")?])?;
     Ok(())
 }
