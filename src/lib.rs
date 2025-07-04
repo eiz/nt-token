@@ -38,28 +38,25 @@ use std::{ffi::c_void, ops::Deref};
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, HLOCAL, LUID, LocalFree,
-            PSID,
+            BOOL, CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_ALL_ASSIGNED, GetLastError,
+            HANDLE, HLOCAL, LUID, LocalFree, PSID,
         },
         Security::{
             AdjustTokenPrivileges,
             Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW},
-            CreateWellKnownSid, DuplicateTokenEx, GetLengthSid, GetSidSubAuthority,
-            GetSidSubAuthorityCount, GetTokenInformation, LUID_AND_ATTRIBUTES, LookupAccountSidW,
-            LookupPrivilegeNameW, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
+            CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, GetLengthSid,
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, LUID_AND_ATTRIBUTES,
+            LookupAccountSidW, LookupPrivilegeNameW, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
             SE_PRIVILEGE_REMOVED, SID_NAME_USE, SecurityImpersonation, TOKEN_ACCESS_MASK,
             TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS, TOKEN_LINKED_TOKEN,
-            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_USER,
-            TokenElevation, TokenElevationType, TokenGroups, TokenIntegrityLevel, TokenLinkedToken,
-            TokenPrimary, TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
+            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE,
+            TOKEN_USER, TokenElevation, TokenElevationType, TokenGroups, TokenIntegrityLevel,
+            TokenLinkedToken, TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
     core::{Error, PCWSTR, PWSTR, Result},
 };
-
-// NEW: helper to accept the common ERROR_INSUFFICIENT_BUFFER probe failure
-use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 
 #[inline]
 fn buffer_probe(res: Result<()>) -> Result<()> {
@@ -76,7 +73,6 @@ fn buffer_probe(res: Result<()>) -> Result<()> {
 
 /// RAII owner for a Windows access‑token `HANDLE`.
 #[derive(Debug)]
-#[repr(transparent)]
 pub struct OwnedToken {
     handle: HANDLE,
 }
@@ -127,7 +123,11 @@ impl Token {
     }
 
     /// Duplicate the referenced token.
-    pub fn duplicate(&self, access: TOKEN_ACCESS_MASK) -> Result<OwnedToken> {
+    pub fn duplicate(
+        &self,
+        access: TOKEN_ACCESS_MASK,
+        token_type: TOKEN_TYPE,
+    ) -> Result<OwnedToken> {
         unsafe {
             let mut dup = HANDLE::default();
             DuplicateTokenEx(
@@ -135,7 +135,7 @@ impl Token {
                 access,
                 None,
                 SecurityImpersonation,
-                TokenPrimary,
+                token_type,
                 &mut dup,
             )?;
             Ok(OwnedToken { handle: dup })
@@ -162,7 +162,6 @@ impl Token {
     pub fn integrity_level(&self) -> Result<u32> {
         unsafe {
             let mut len = 0u32;
-            // Probe once – an ERROR_INSUFFICIENT_BUFFER reply just tells us how much to allocate.
             buffer_probe(GetTokenInformation(
                 self.handle,
                 TokenIntegrityLevel,
@@ -187,7 +186,6 @@ impl Token {
     pub fn groups(&self) -> Result<Vec<Group>> {
         unsafe {
             let mut len = 0u32;
-            // Probe for required buffer length (an insufficient-buffer error is expected).
             buffer_probe(GetTokenInformation(
                 self.handle,
                 TokenGroups,
@@ -256,7 +254,6 @@ impl Token {
     pub fn user(&self) -> Result<Sid> {
         unsafe {
             let mut len = 0u32;
-            // probe for buffer size
             buffer_probe(GetTokenInformation(
                 self.handle,
                 TokenUser,
@@ -281,7 +278,6 @@ impl Token {
     pub fn privileges(&self) -> Result<Vec<Privilege>> {
         unsafe {
             let mut len = 0u32;
-            // First probe call just to get the required buffer length.
             buffer_probe(GetTokenInformation(
                 self.handle,
                 TokenPrivileges,
@@ -351,6 +347,20 @@ impl Token {
             }
         }
         Ok(())
+    }
+
+    /// Check whether this token contains the specified SID (group membership).
+    pub fn check_membership(&self, sid: &Sid) -> Result<bool> {
+        unsafe {
+            let mut is_member = BOOL(0);
+            // Safety: `sid.buf` is a valid SID buffer.
+            CheckTokenMembership(
+                self.handle,
+                PSID(sid.buf.as_ptr() as *mut c_void),
+                &mut is_member,
+            )?;
+            Ok(is_member.as_bool())
+        }
     }
 }
 
