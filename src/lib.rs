@@ -29,16 +29,17 @@ use std::{ffi::c_void, ops::Deref};
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE,
-            HLOCAL, LUID, LocalFree,
+            CloseHandle, E_INVALIDARG, ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_ALL_ASSIGNED,
+            GetLastError, HANDLE, HLOCAL, LUID, LocalFree,
         },
         Security::{
-            AdjustTokenPrivileges,
+            AdjustTokenPrivileges, AllocateAndInitializeSid,
             Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW},
-            CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, GetLengthSid,
-            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, LUID_AND_ATTRIBUTES,
-            LookupAccountSidW, LookupPrivilegeNameW, LookupPrivilegeValueW, PSID,
-            SE_PRIVILEGE_ENABLED, SE_PRIVILEGE_REMOVED, SID_NAME_USE, SecurityImpersonation,
+            CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, FreeSid, GetLengthSid,
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, IsValidSid,
+            IsWellKnownSid, LUID_AND_ATTRIBUTES, LookupAccountSidW, LookupPrivilegeNameW,
+            LookupPrivilegeValueW, PSID, SE_PRIVILEGE_ENABLED, SE_PRIVILEGE_REMOVED,
+            SECURITY_NT_AUTHORITY, SID_IDENTIFIER_AUTHORITY, SID_NAME_USE, SecurityImpersonation,
             TOKEN_ACCESS_MASK, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS,
             TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
             TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE, TOKEN_USER, TokenElevation,
@@ -78,6 +79,26 @@ impl OwnedToken {
             Ok(Self { handle: h })
         }
     }
+
+    /// Wrap an existing token `HANDLE`.
+    ///
+    /// # Safety
+    /// The caller must ensure that `handle` is a valid access-token handle
+    /// that is **exclusively owned** – it will be automatically closed when the
+    /// returned `OwnedToken` is dropped.
+    pub unsafe fn new(handle: HANDLE) -> Self {
+        Self { handle }
+    }
+
+    /// Release ownership and return the raw `HANDLE` without closing it.
+    ///
+    /// This prevents the handle from being closed when the wrapper is dropped;
+    /// the caller becomes responsible for eventually calling `CloseHandle`.
+    pub fn into_raw(self) -> HANDLE {
+        let h = self.handle;
+        std::mem::forget(self);
+        h
+    }
 }
 
 impl Drop for OwnedToken {
@@ -89,7 +110,7 @@ impl Drop for OwnedToken {
 impl Deref for OwnedToken {
     type Target = Token;
     fn deref(&self) -> &Self::Target {
-        Token::new(&self.handle)
+        unsafe { Token::new(&self.handle) }
     }
 }
 
@@ -105,7 +126,7 @@ pub struct Token {
 }
 
 impl Token {
-    pub fn new(handle: &HANDLE) -> &Self {
+    pub unsafe fn new(handle: &HANDLE) -> &Self {
         unsafe { &*(handle as *const HANDLE as *const Token) }
     }
 
@@ -479,6 +500,62 @@ impl Sid {
             }
             Ok(*rid_ptr)
         }
+    }
+
+    /// Is this SID structurally valid (according to `IsValidSid`)?
+    pub fn is_valid(&self) -> bool {
+        unsafe { IsValidSid(PSID(self.buf.as_ptr() as *mut _)).as_bool() }
+    }
+
+    /// Does this SID match the specified well-known SID type?
+    pub fn is_well_known(&self, kind: WELL_KNOWN_SID_TYPE) -> bool {
+        unsafe { IsWellKnownSid(PSID(self.buf.as_ptr() as *mut _), kind).as_bool() }
+    }
+
+    /// Build a SID from an identifier authority and a slice of 32-bit
+    /// sub-authorities. Internally this uses `AllocateAndInitializeSid`, which
+    /// supports up to 8 sub-authorities.
+    pub fn from_parts(authority: &SID_IDENTIFIER_AUTHORITY, subids: &[u32]) -> Result<Self> {
+        if subids.len() > 8 {
+            return Err(Error::new(E_INVALIDARG, "too many RIDs"));
+        }
+
+        unsafe {
+            let mut psid = PSID::default();
+            // Zero-fill the parameters for the varargs call.
+            let mut subs = [0u32; 8];
+            for (i, &rid) in subids.iter().enumerate() {
+                subs[i] = rid;
+            }
+
+            AllocateAndInitializeSid(
+                authority,
+                subids.len() as u8,
+                subs[0],
+                subs[1],
+                subs[2],
+                subs[3],
+                subs[4],
+                subs[5],
+                subs[6],
+                subs[7],
+                &mut psid,
+            )?;
+
+            // Copy into a Rust-managed buffer then free the Win32 allocation.
+            let len = GetLengthSid(psid);
+            let slice = std::slice::from_raw_parts(psid.0 as *const u8, len as usize);
+            let buf = slice.to_vec();
+            FreeSid(psid);
+
+            Ok(Self { buf })
+        }
+    }
+
+    /// Convenience helper: construct an `S-1-5-…` SID under the NT authority
+    /// (`SECURITY_NT_AUTHORITY`) from the provided subauthorities.
+    pub fn from_nt_authority(subids: &[u32]) -> Result<Self> {
+        Self::from_parts(&SECURITY_NT_AUTHORITY, subids)
     }
 }
 

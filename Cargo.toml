@@ -1,11 +1,16 @@
 [package]
 name = "nt-token"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Mack Straight <mack@str.rs>"]
 license = "MIT"
 repository = "https://github.com/eiz/nt-token"
 description = "Ergonomic wrapper for Windows NT access tokens"
+
+# Instruct docs.rs to build documentation using the Windows MSVC target,
+# since this crate is Windows-only.
+[package.metadata.docs.rs]
+targets = ["x86_64-pc-windows-msvc"]
 
 [dependencies]
 windows = { version = "0.61", features = [
