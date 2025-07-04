@@ -37,15 +37,16 @@
 use std::{ffi::c_void, ops::Deref};
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree, PSID},
+        Foundation::{CloseHandle, HANDLE, HLOCAL, LUID, LocalFree, PSID},
         Security::{
             Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW},
             CreateWellKnownSid, DuplicateTokenEx, GetLengthSid, GetSidSubAuthority,
-            GetSidSubAuthorityCount, GetTokenInformation, LookupAccountSidW, SID_NAME_USE,
-            SecurityImpersonation, TOKEN_ACCESS_MASK, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE,
-            TOKEN_GROUPS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_USER, TokenElevation,
-            TokenElevationType, TokenGroups, TokenIntegrityLevel, TokenLinkedToken, TokenPrimary,
-            TokenUser, WELL_KNOWN_SID_TYPE,
+            GetSidSubAuthorityCount, GetTokenInformation, LUID_AND_ATTRIBUTES, LookupAccountSidW,
+            LookupPrivilegeNameW, SE_PRIVILEGE_ENABLED, SID_NAME_USE, SecurityImpersonation,
+            TOKEN_ACCESS_MASK, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS,
+            TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_USER,
+            TokenElevation, TokenElevationType, TokenGroups, TokenIntegrityLevel, TokenLinkedToken,
+            TokenPrimary, TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
@@ -262,6 +263,38 @@ impl Token {
             Sid::from_ptr(tu.User.Sid)
         }
     }
+
+    /// Enumerate privileges contained in the token.
+    pub fn privileges(&self) -> Result<Vec<Privilege>> {
+        unsafe {
+            let mut len = 0u32;
+            // First probe call just to get the required buffer length.
+            buffer_probe(GetTokenInformation(
+                self.handle,
+                TokenPrivileges,
+                None,
+                0,
+                &mut len,
+            ))?;
+
+            let mut buf = vec![0u8; len as usize];
+            GetTokenInformation(
+                self.handle,
+                TokenPrivileges,
+                Some(buf.as_mut_ptr() as *mut c_void),
+                len,
+                &mut len,
+            )?;
+
+            let tprivs = &*(buf.as_ptr() as *const TOKEN_PRIVILEGES);
+            let slice = std::slice::from_raw_parts(
+                tprivs.Privileges.as_ptr(),
+                tprivs.PrivilegeCount as usize,
+            );
+
+            Ok(slice.iter().map(|la| Privilege::from_raw(la)).collect())
+        }
+    }
 }
 
 impl<'a> From<&'a OwnedToken> for Token {
@@ -401,5 +434,74 @@ impl std::fmt::Display for Sid {
             Ok(s) => write!(f, "{s}"),
             Err(_) => write!(f, "<invalid sid>"),
         }
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Privilege                                                                 */
+/* ------------------------------------------------------------------------- */
+
+/// Token privilege (immutable snapshot).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Privilege {
+    luid: LUID,
+    attributes: u32,
+}
+
+impl Privilege {
+    /// Internal helper – build from a raw `LUID_AND_ATTRIBUTES` entry.
+    pub(crate) fn from_raw(la: &LUID_AND_ATTRIBUTES) -> Self {
+        Self {
+            luid: la.Luid,
+            attributes: la.Attributes.0,
+        }
+    }
+
+    /// Return the privilege name (e.g. `SeDebugPrivilege`).
+    pub fn name(&self) -> Result<String> {
+        unsafe {
+            let mut len = 0u32;
+            // Probe for required length (expected to fail with INSUFFICIENT_BUFFER).
+            buffer_probe(LookupPrivilegeNameW(
+                PCWSTR::null(),
+                &self.luid,
+                PWSTR::null(),
+                &mut len,
+            ))?;
+
+            let mut buf = vec![0u16; len as usize];
+            LookupPrivilegeNameW(
+                PCWSTR::null(),
+                &self.luid,
+                PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )?;
+
+            Ok(String::from_utf16_lossy(&buf[..len as usize]))
+        }
+    }
+
+    /// Raw attributes bitmask (see `SE_PRIVILEGE_*` constants).
+    pub fn attributes(&self) -> u32 {
+        self.attributes
+    }
+
+    /// Is this privilege currently enabled?
+    pub fn is_enabled(&self) -> bool {
+        self.attributes & SE_PRIVILEGE_ENABLED.0 != 0
+    }
+}
+
+impl std::fmt::Display for Privilege {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = self
+            .name()
+            .unwrap_or_else(|_| format!("LUID({:?},{:?})", self.luid.HighPart, self.luid.LowPart));
+        let state = if self.is_enabled() {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        write!(f, "{name} ({state})")
     }
 }
