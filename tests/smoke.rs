@@ -1,8 +1,8 @@
 use nt_token::{Group, OwnedToken, Privilege, Sid, Token};
 use windows::{
     Win32::Security::{
-        CREATE_RESTRICTED_TOKEN_FLAGS, DISABLE_MAX_PRIVILEGE, TOKEN_ADJUST_PRIVILEGES,
-        TOKEN_DUPLICATE, TOKEN_QUERY, TokenImpersonation, WinBuiltinAdministratorsSid,
+        DISABLE_MAX_PRIVILEGE, SecurityImpersonation, TOKEN_ADJUST_PRIVILEGES, TOKEN_DUPLICATE,
+        TOKEN_QUERY, TokenElevationTypeLimited, TokenImpersonation, WinBuiltinAdministratorsSid,
     },
     core::Result,
 };
@@ -55,6 +55,16 @@ fn print_token_info(tok: &Token) -> Result<()> {
             _ => "unknown",
         }
     );
+    if let Ok(lvl) = tok.impersonation_level() {
+        let lvl_str = match lvl.0 {
+            0 => "anonymous",
+            1 => "identification",
+            2 => "impersonation",
+            3 => "delegation",
+            _ => "unknown",
+        };
+        println!("impersonation lvl = {}", lvl_str);
+    }
 
     for g in tok.groups()? {
         let (name, domain) = g.account()?;
@@ -95,10 +105,28 @@ fn print_token_info(tok: &Token) -> Result<()> {
     Ok(())
 }
 
+fn elevated_token(original: &Token) -> Result<OwnedToken> {
+    let tok = original.duplicate(
+        TOKEN_QUERY | TOKEN_DUPLICATE,
+        TokenImpersonation,
+        SecurityImpersonation,
+    )?;
+    let elevation_type = tok.elevation_type()?;
+    if elevation_type == TokenElevationTypeLimited {
+        Ok(tok.linked_token().unwrap_or(tok))
+    } else {
+        Ok(tok)
+    }
+}
+
 #[test]
 fn current_process_token_info() -> Result<()> {
     let tok = OwnedToken::from_current_process(TOKEN_QUERY | TOKEN_DUPLICATE)?;
-    let impersonation = tok.duplicate(TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, TokenImpersonation)?;
+    let impersonation = tok.duplicate(
+        TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,
+        TokenImpersonation,
+        SecurityImpersonation,
+    )?;
     println!("=== Current Process Token ===");
     print_token_info(&tok)?;
     println!("=== Current Process Token (Impersonation) ===");
@@ -120,10 +148,9 @@ fn current_process_token_info() -> Result<()> {
 
 #[test]
 fn restricted_token() -> Result<()> {
-    let tok = OwnedToken::from_current_process(TOKEN_QUERY | TOKEN_DUPLICATE)?
-        .duplicate(TOKEN_QUERY | TOKEN_DUPLICATE, TokenImpersonation)?;
-    let linked = tok.linked_token()?;
-    let restricted = linked.create_restricted_token(
+    let tok = OwnedToken::from_current_process(TOKEN_QUERY | TOKEN_DUPLICATE)?;
+    let tok = elevated_token(&tok)?;
+    let restricted = tok.create_restricted_token(
         DISABLE_MAX_PRIVILEGE,
         &[Group::disabled(Sid::well_known(
             WinBuiltinAdministratorsSid,

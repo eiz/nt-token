@@ -39,13 +39,14 @@ use windows::{
             CreateWellKnownSid, DuplicateTokenEx, FreeSid, GetLengthSid, GetSidSubAuthority,
             GetSidSubAuthorityCount, GetTokenInformation, IsValidSid, IsWellKnownSid,
             LUID_AND_ATTRIBUTES, LookupAccountSidW, LookupPrivilegeNameW, LookupPrivilegeValueW,
-            PSID, SE_PRIVILEGE_ENABLED, SE_PRIVILEGE_REMOVED, SECURITY_NT_AUTHORITY,
-            SID_IDENTIFIER_AUTHORITY, SID_NAME_USE, SecurityImpersonation, TOKEN_ACCESS_MASK,
-            TOKEN_APPCONTAINER_INFORMATION, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS,
-            TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
-            TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE, TOKEN_USER, TokenAppContainerNumber,
-            TokenAppContainerSid, TokenCapabilities, TokenDeviceGroups, TokenElevation,
-            TokenElevationType, TokenGroups, TokenHasRestrictions, TokenIntegrityLevel,
+            PSID, SE_PRIVILEGE_ENABLED, SE_PRIVILEGE_REMOVED, SECURITY_IMPERSONATION_LEVEL,
+            SECURITY_NT_AUTHORITY, SID_IDENTIFIER_AUTHORITY, SID_NAME_USE, SecurityImpersonation,
+            TOKEN_ACCESS_MASK, TOKEN_APPCONTAINER_INFORMATION, TOKEN_ELEVATION,
+            TOKEN_ELEVATION_TYPE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN,
+            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE,
+            TOKEN_USER, TokenAppContainerNumber, TokenAppContainerSid, TokenCapabilities,
+            TokenDeviceGroups, TokenElevation, TokenElevationType, TokenGroups,
+            TokenHasRestrictions, TokenImpersonationLevel, TokenIntegrityLevel,
             TokenIsAppContainer, TokenLinkedToken, TokenLogonSid, TokenOwner, TokenPrimary,
             TokenPrimaryGroup, TokenPrivileges, TokenRestrictedDeviceGroups, TokenRestrictedSids,
             TokenType, TokenUIAccess, TokenUser, TokenVirtualizationAllowed,
@@ -152,17 +153,11 @@ impl Token {
         &self,
         access: TOKEN_ACCESS_MASK,
         token_type: TOKEN_TYPE,
+        imp_level: SECURITY_IMPERSONATION_LEVEL,
     ) -> Result<OwnedToken> {
         unsafe {
             let mut dup = HANDLE::default();
-            DuplicateTokenEx(
-                self.handle,
-                access,
-                None,
-                SecurityImpersonation,
-                token_type,
-                &mut dup,
-            )?;
+            DuplicateTokenEx(self.handle, access, None, imp_level, token_type, &mut dup)?;
             Ok(OwnedToken { handle: dup })
         }
     }
@@ -295,6 +290,22 @@ impl Token {
                 &mut ret,
             )?;
             Ok(et)
+        }
+    }
+
+    /// Retrieve the impersonation level (only valid for impersonation tokens).
+    pub fn impersonation_level(&self) -> Result<SECURITY_IMPERSONATION_LEVEL> {
+        unsafe {
+            let mut lvl: SECURITY_IMPERSONATION_LEVEL = std::mem::zeroed();
+            let mut ret = 0u32;
+            GetTokenInformation(
+                self.handle,
+                TokenImpersonationLevel,
+                Some(&mut lvl as *mut _ as *mut c_void),
+                std::mem::size_of::<SECURITY_IMPERSONATION_LEVEL>() as u32,
+                &mut ret,
+            )?;
+            Ok(lvl)
         }
     }
 
