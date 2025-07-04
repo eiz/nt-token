@@ -49,9 +49,9 @@ use windows::{
             LookupPrivilegeNameW, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
             SE_PRIVILEGE_REMOVED, SID_NAME_USE, SecurityImpersonation, TOKEN_ACCESS_MASK,
             TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS, TOKEN_LINKED_TOKEN,
-            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_USER, TokenElevation,
-            TokenElevationType, TokenGroups, TokenIntegrityLevel, TokenLinkedToken, TokenPrimary,
-            TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
+            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_USER,
+            TokenElevation, TokenElevationType, TokenGroups, TokenIntegrityLevel, TokenLinkedToken,
+            TokenPrimary, TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
@@ -334,7 +334,7 @@ impl Token {
 
             for (i, p) in privs.iter().enumerate() {
                 *la_ptr.add(i) = LUID_AND_ATTRIBUTES {
-                    Luid: p.luid,
+                    Luid: p.la.Luid,
                     Attributes: if p.is_enabled() {
                         SE_PRIVILEGE_ENABLED
                     } else {
@@ -536,51 +536,44 @@ impl std::fmt::Display for Group {
 /// Token privilege (immutable snapshot).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Privilege {
-    luid: LUID,
-    attributes: u32,
+    la: LUID_AND_ATTRIBUTES,
 }
 
 impl Privilege {
     /// Internal helper – build from a raw `LUID_AND_ATTRIBUTES` entry.
     pub(crate) fn from_raw(la: &LUID_AND_ATTRIBUTES) -> Self {
-        Self {
-            luid: la.Luid,
-            attributes: la.Attributes.0,
-        }
+        Self { la: *la }
     }
 
     /// Return the privilege name (e.g. `SeDebugPrivilege`).
     pub fn name(&self) -> Result<String> {
         unsafe {
             let mut len = 0u32;
-            // Probe for required length (expected to fail with INSUFFICIENT_BUFFER).
             buffer_probe(LookupPrivilegeNameW(
                 PCWSTR::null(),
-                &self.luid,
+                &self.la.Luid,
                 PWSTR::null(),
                 &mut len,
             ))?;
-
             let mut buf = vec![0u16; len as usize];
             LookupPrivilegeNameW(
                 PCWSTR::null(),
-                &self.luid,
+                &self.la.Luid,
                 PWSTR(buf.as_mut_ptr()),
                 &mut len,
             )?;
-
             Ok(String::from_utf16_lossy(&buf[..len as usize]))
         }
     }
 
     /// Raw attributes bitmask (see `SE_PRIVILEGE_*` constants).
-    pub fn attributes(&self) -> u32 {
-        self.attributes
+    pub fn attributes(&self) -> TOKEN_PRIVILEGES_ATTRIBUTES {
+        self.la.Attributes
     }
 
     /// Is this privilege currently enabled?
     pub fn is_enabled(&self) -> bool {
-        self.attributes & SE_PRIVILEGE_ENABLED.0 != 0
+        self.la.Attributes.contains(SE_PRIVILEGE_ENABLED)
     }
 
     /// Construct a privilege specification by name and desired enabled state.
@@ -595,8 +588,14 @@ impl Privilege {
             LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wide.as_ptr()), &mut luid)?;
 
             Ok(Self {
-                luid,
-                attributes: if enable { SE_PRIVILEGE_ENABLED.0 } else { 0 },
+                la: LUID_AND_ATTRIBUTES {
+                    Luid: luid,
+                    Attributes: if enable {
+                        SE_PRIVILEGE_ENABLED
+                    } else {
+                        SE_PRIVILEGE_REMOVED
+                    },
+                },
             })
         }
     }
@@ -616,9 +615,10 @@ impl Privilege {
 
 impl std::fmt::Display for Privilege {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = self
-            .name()
-            .unwrap_or_else(|_| format!("LUID({:?},{:?})", self.luid.HighPart, self.luid.LowPart));
+        let name = self.name().unwrap_or_else(|_| {
+            let luid = self.la.Luid;
+            format!("LUID({:?},{:?})", luid.HighPart, luid.LowPart)
+        });
         let state = if self.is_enabled() {
             "enabled"
         } else {
