@@ -2,7 +2,7 @@
 //!
 //! The design intentionally mirrors `PathBuf`/`Path`:
 //! * **`OwnedToken`** – owns the underlying `HANDLE` and closes it on `Drop`.
-//! * **`TokenRef`** – a transparent, zero‑cost view; every high‑level API lives here.
+//! * **`Token`** – a transparent, zero‑cost view; every high‑level API lives here.
 //! * **`Deref` implementation** lets you call `token.is_elevated()` directly on an `OwnedToken`.
 //!
 //! ```toml
@@ -28,8 +28,8 @@
 //!
 //! ---
 //! **Highlights**
-//! * `TokenRef` is `#[repr(transparent)]`, `Copy`, and has **no lifetime parameter**.
-//! * `OwnedToken: Deref<Target = TokenRef>` – zero‑cost cast (same layout).
+//! * `Token` is `#[repr(transparent)]`, `Copy`, and has **no lifetime parameter**.
+//! * `OwnedToken: Deref<Target = Token>` – zero‑cost cast (same layout).
 //! * `Sid` covers canonical formatting, parsing, well‑known SIDs, and name lookup.
 //!
 //! Feel free to extend with more `GetTokenInformation` variants – the pattern is identical.
@@ -93,24 +93,28 @@ impl Drop for OwnedToken {
 }
 
 impl Deref for OwnedToken {
-    type Target = TokenRef;
+    type Target = Token;
     fn deref(&self) -> &Self::Target {
-        unsafe { &*(self as *const OwnedToken as *const TokenRef) }
+        Token::new(&self.handle)
     }
 }
 
 /* ------------------------------------------------------------------------- */
-/* TokenRef                                                                  */
+/* Token                                                                  */
 /* ------------------------------------------------------------------------- */
 
 /// Borrowed, zero‑cost view of a token `HANDLE` (like `Path`).
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug)]
-pub struct TokenRef {
+pub struct Token {
     handle: HANDLE,
 }
 
-impl TokenRef {
+impl Token {
+    pub fn new(handle: &HANDLE) -> &Self {
+        unsafe { &*(handle as *const HANDLE as *const Token) }
+    }
+
     /// Raw handle (borrowed).
     pub fn handle(&self) -> HANDLE {
         self.handle
@@ -260,9 +264,9 @@ impl TokenRef {
     }
 }
 
-impl<'a> From<&'a OwnedToken> for TokenRef {
+impl<'a> From<&'a OwnedToken> for Token {
     fn from(tok: &'a OwnedToken) -> Self {
-        TokenRef { handle: tok.handle }
+        Token { handle: tok.handle }
     }
 }
 
