@@ -1,61 +1,53 @@
-//! Safe, ergonomic wrappers for Windows **access tokens** and **SIDs** using the `windows` crate.
+//! # nt_token
 //!
-//! The design intentionally mirrors `PathBuf`/`Path`:
-//! * **`OwnedToken`** – owns the underlying `HANDLE` and closes it on `Drop`.
-//! * **`Token`** – a transparent, zero‑cost view; every high‑level API lives here.
-//! * **`Deref` implementation** lets you call `token.is_elevated()` directly on an `OwnedToken`.
+//! Memory-safe, ergonomic helpers for working with Windows access tokens and security identifiers (SIDs) in Rust.
 //!
-//! ```toml
-//! [dependencies]
-//! windows = { version = "0.57", features = [
-//!     "Win32_Foundation", "Win32_Security",
-//!     "Win32_System_Threading", "Win32_System_Memory",
-//! ] }
-//! ```
+//! This crate builds on the `windows` crate and deliberately mirrors the `PathBuf` / `Path` API shape:
 //!
-//! ## Quick example
+//! * `OwnedToken` – owns a `HANDLE` and releases it automatically on `Drop`.
+//! * `Token` – zero-cost borrowed view (`#[repr(transparent)]`); most high-level methods live here.
+//! * `Sid` – owned, immutable SID with parsing, formatting and account-lookup helpers.
+//!
+//! ## Quick start
+//!
 //! ```rust
 //! use nt_token::{OwnedToken, Sid};
 //! use windows::Win32::Security::TOKEN_QUERY;
 //!
 //! # fn main() -> windows::core::Result<()> {
-//! let tok = OwnedToken::from_current_process(TOKEN_QUERY)?;
-//! println!("elevated = {}",  tok.is_elevated()?);       // <‑‑ via Deref
-//! println!("IL RID  = 0x{:x}", tok.integrity_level()?);
-//! for g in tok.groups()? { println!("group → {g}"); }
+//! let token = OwnedToken::from_current_process(TOKEN_QUERY)?;
+//! println!("elevated         = {}", token.is_elevated()?);
+//! println!("integrity level  = 0x{:x}", token.integrity_level()?);
+//!
+//! for g in token.groups()? {
+//!     println!("group → {g}");
+//! }
 //! # Ok(()) }
 //! ```
-//!
-//! ---
-//! **Highlights**
-//! * `Token` is `#[repr(transparent)]`, `Copy`, and has **no lifetime parameter**.
-//! * `OwnedToken: Deref<Target = Token>` – zero‑cost cast (same layout).
-//! * `Sid` covers canonical formatting, parsing, well‑known SIDs, and name lookup.
-//!
-//! Feel free to extend with more `GetTokenInformation` variants – the pattern is identical.
 
 use std::{ffi::c_void, ops::Deref};
 use windows::{
     Win32::{
         Foundation::{
-            BOOL, CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_ALL_ASSIGNED, GetLastError,
-            HANDLE, HLOCAL, LUID, LocalFree, PSID,
+            CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE,
+            HLOCAL, LUID, LocalFree,
         },
         Security::{
             AdjustTokenPrivileges,
             Authorization::{ConvertSidToStringSidW, ConvertStringSidToSidW},
             CheckTokenMembership, CreateWellKnownSid, DuplicateTokenEx, GetLengthSid,
             GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, LUID_AND_ATTRIBUTES,
-            LookupAccountSidW, LookupPrivilegeNameW, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
-            SE_PRIVILEGE_REMOVED, SID_NAME_USE, SecurityImpersonation, TOKEN_ACCESS_MASK,
-            TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS, TOKEN_LINKED_TOKEN,
-            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE,
-            TOKEN_USER, TokenElevation, TokenElevationType, TokenGroups, TokenIntegrityLevel,
-            TokenLinkedToken, TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
+            LookupAccountSidW, LookupPrivilegeNameW, LookupPrivilegeValueW, PSID,
+            SE_PRIVILEGE_ENABLED, SE_PRIVILEGE_REMOVED, SID_NAME_USE, SecurityImpersonation,
+            TOKEN_ACCESS_MASK, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS,
+            TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
+            TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE, TOKEN_USER, TokenElevation,
+            TokenElevationType, TokenGroups, TokenIntegrityLevel, TokenLinkedToken,
+            TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
-    core::{Error, PCWSTR, PWSTR, Result},
+    core::{BOOL, Error, PCWSTR, PWSTR, Result},
 };
 
 #[inline]
@@ -355,7 +347,7 @@ impl Token {
             let mut is_member = BOOL(0);
             // Safety: `sid.buf` is a valid SID buffer.
             CheckTokenMembership(
-                self.handle,
+                Some(self.handle),
                 PSID(sid.buf.as_ptr() as *mut c_void),
                 &mut is_member,
             )?;
@@ -392,7 +384,7 @@ impl Sid {
             let len = GetLengthSid(psid);
             let slice = std::slice::from_raw_parts(psid.0 as *const u8, len as usize);
             let v = slice.to_vec();
-            LocalFree(HLOCAL(psid.0 as *mut c_void));
+            LocalFree(Some(HLOCAL(psid.0 as *mut c_void)));
             Ok(Self { buf: v })
         }
     }
@@ -403,7 +395,7 @@ impl Sid {
             let mut pwstr = PWSTR::null();
             ConvertSidToStringSidW(PSID(self.buf.as_ptr() as *mut c_void), &mut pwstr)?;
             let s = pwstr.to_string()?;
-            LocalFree(HLOCAL(pwstr.0 as *mut c_void));
+            LocalFree(Some(HLOCAL(pwstr.0 as *mut c_void)));
             Ok(s)
         }
     }
@@ -417,9 +409,9 @@ impl Sid {
             buffer_probe(LookupAccountSidW(
                 PCWSTR::null(),
                 PSID(self.buf.as_ptr() as *mut _),
-                PWSTR::null(),
+                None,
                 &mut name_len,
-                PWSTR::null(),
+                None,
                 &mut dom_len,
                 &mut use_ty,
             ))?;
@@ -428,9 +420,9 @@ impl Sid {
             LookupAccountSidW(
                 PCWSTR::null(),
                 PSID(self.buf.as_ptr() as *mut _),
-                PWSTR(name.as_mut_ptr()),
+                Some(PWSTR(name.as_mut_ptr())),
                 &mut name_len,
-                PWSTR(dom.as_mut_ptr()),
+                Some(PWSTR(dom.as_mut_ptr())),
                 &mut dom_len,
                 &mut use_ty,
             )?;
@@ -445,17 +437,12 @@ impl Sid {
     pub fn well_known(kind: WELL_KNOWN_SID_TYPE) -> Result<Self> {
         unsafe {
             let mut size = 0u32;
-            buffer_probe(CreateWellKnownSid(
-                kind,
-                PSID::default(),
-                PSID::default(),
-                &mut size,
-            ))?;
+            buffer_probe(CreateWellKnownSid(kind, None, None, &mut size))?;
             let mut buf = vec![0u8; size as usize];
             CreateWellKnownSid(
                 kind,
-                PSID::default(),
-                PSID(buf.as_mut_ptr() as *mut _),
+                None,
+                Some(PSID(buf.as_mut_ptr() as *mut _)),
                 &mut size,
             )?;
             Ok(Self { buf })
@@ -544,7 +531,7 @@ impl std::fmt::Display for Group {
 /* ------------------------------------------------------------------------- */
 
 /// Token privilege (immutable snapshot).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Privilege {
     la: LUID_AND_ATTRIBUTES,
 }
@@ -562,14 +549,14 @@ impl Privilege {
             buffer_probe(LookupPrivilegeNameW(
                 PCWSTR::null(),
                 &self.la.Luid,
-                PWSTR::null(),
+                None,
                 &mut len,
             ))?;
             let mut buf = vec![0u16; len as usize];
             LookupPrivilegeNameW(
                 PCWSTR::null(),
                 &self.la.Luid,
-                PWSTR(buf.as_mut_ptr()),
+                Some(PWSTR(buf.as_mut_ptr())),
                 &mut len,
             )?;
             Ok(String::from_utf16_lossy(&buf[..len as usize]))

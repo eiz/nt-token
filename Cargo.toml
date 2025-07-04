@@ -2,9 +2,13 @@
 name = "nt-token"
 version = "0.1.0"
 edition = "2024"
+authors = ["Mack Straight <mack@str.rs>"]
+license = "MIT"
+repository = "https://github.com/eiz/nt-token"
+description = "Ergonomic wrapper for Windows NT access tokens"
 
 [dependencies]
-windows = { version = "0.57", features = [
+windows = { version = "0.61", features = [
      "Win32_Foundation",
      "Win32_Security",
      "Win32_Security_Authorization",
