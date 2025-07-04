@@ -25,6 +25,7 @@ fn print_token_info(tok: &Token) -> Result<()> {
     println!("has restrictions  = {}", tok.has_restrictions()?);
     println!("virt allowed      = {}", tok.virtualization_allowed()?);
     println!("virt enabled      = {}", tok.virtualization_enabled()?);
+    println!("ui access         = {}", tok.ui_access()?);
     println!("app container     = {}", tok.is_app_container()?);
 
     let owner = tok.owner()?;

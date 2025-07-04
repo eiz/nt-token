@@ -46,7 +46,7 @@ use windows::{
             TokenDeviceGroups, TokenElevation, TokenElevationType, TokenGroups,
             TokenHasRestrictions, TokenIntegrityLevel, TokenIsAppContainer, TokenLinkedToken,
             TokenLogonSid, TokenOwner, TokenPrimary, TokenPrimaryGroup, TokenPrivileges,
-            TokenRestrictedDeviceGroups, TokenRestrictedSids, TokenType, TokenUser,
+            TokenRestrictedDeviceGroups, TokenRestrictedSids, TokenType, TokenUIAccess, TokenUser,
             TokenVirtualizationAllowed, TokenVirtualizationEnabled, WELL_KNOWN_SID_TYPE,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
@@ -468,6 +468,11 @@ impl Token {
             )?;
             Ok(is_member.as_bool())
         }
+    }
+
+    /// Does the token have UIAccess privilege (non-elevated UI automation)?
+    pub fn ui_access(&self) -> Result<bool> {
+        self.bool_info(TokenUIAccess)
     }
 }
 
