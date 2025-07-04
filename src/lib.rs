@@ -40,9 +40,10 @@ use windows::{
             IsWellKnownSid, LUID_AND_ATTRIBUTES, LookupAccountSidW, LookupPrivilegeNameW,
             LookupPrivilegeValueW, PSID, SE_PRIVILEGE_ENABLED, SE_PRIVILEGE_REMOVED,
             SECURITY_NT_AUTHORITY, SID_IDENTIFIER_AUTHORITY, SID_NAME_USE, SecurityImpersonation,
-            TOKEN_ACCESS_MASK, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS,
-            TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
-            TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE, TOKEN_USER, TokenCapabilities,
+            TOKEN_ACCESS_MASK, TOKEN_APPCONTAINER_INFORMATION, TOKEN_ELEVATION,
+            TOKEN_ELEVATION_TYPE, TOKEN_GROUPS, TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN,
+            TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES, TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE,
+            TOKEN_USER, TokenAppContainerNumber, TokenAppContainerSid, TokenCapabilities,
             TokenDeviceGroups, TokenElevation, TokenElevationType, TokenGroups,
             TokenHasRestrictions, TokenIntegrityLevel, TokenIsAppContainer, TokenLinkedToken,
             TokenLogonSid, TokenOwner, TokenPrimary, TokenPrimaryGroup, TokenPrivileges,
@@ -289,22 +290,6 @@ impl Token {
         }
     }
 
-    /// Helper: retrieve a DWORD token information field and map non-zero to `true`.
-    fn bool_info(&self, class: TOKEN_INFORMATION_CLASS) -> Result<bool> {
-        unsafe {
-            let mut val: u32 = 0;
-            let mut ret = 0u32;
-            GetTokenInformation(
-                self.handle,
-                class,
-                Some(&mut val as *mut _ as *mut c_void),
-                std::mem::size_of::<u32>() as u32,
-                &mut ret,
-            )?;
-            Ok(val != 0)
-        }
-    }
-
     /// Helper: retrieve a variable-length `GetTokenInformation` buffer.
     #[inline]
     fn info_buffer(&self, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<u8>> {
@@ -321,6 +306,28 @@ impl Token {
             )?;
             Ok(buf)
         }
+    }
+
+    /// Helper: retrieve a DWORD token information field.
+    #[inline]
+    fn dword_info(&self, class: TOKEN_INFORMATION_CLASS) -> Result<u32> {
+        unsafe {
+            let mut val: u32 = 0;
+            let mut ret = 0u32;
+            GetTokenInformation(
+                self.handle,
+                class,
+                Some(&mut val as *mut _ as *mut c_void),
+                std::mem::size_of::<u32>() as u32,
+                &mut ret,
+            )?;
+            Ok(val)
+        }
+    }
+
+    /// Helper: retrieve a bool token information field.
+    fn bool_info(&self, class: TOKEN_INFORMATION_CLASS) -> Result<bool> {
+        Ok(self.dword_info(class)? != 0)
     }
 
     /// Does the token have any restrictions (sandboxed / filtered token)?
@@ -473,6 +480,22 @@ impl Token {
     /// Does the token have UIAccess privilege (non-elevated UI automation)?
     pub fn ui_access(&self) -> Result<bool> {
         self.bool_info(TokenUIAccess)
+    }
+
+    /// Return the app-container SID associated with this token, or `None` if the token is not an AppContainer.
+    pub fn app_container_sid(&self) -> Result<Option<Sid>> {
+        let buf = self.info_buffer(TokenAppContainerSid)?;
+        let info = unsafe { &*(buf.as_ptr() as *const TOKEN_APPCONTAINER_INFORMATION) };
+        if info.TokenAppContainer.0.is_null() {
+            return Ok(None);
+        }
+        let sid = unsafe { Sid::from_ptr(info.TokenAppContainer)? };
+        Ok(Some(sid))
+    }
+
+    /// Return the app-container number assigned by the system.
+    pub fn app_container_number(&self) -> Result<u32> {
+        self.dword_info(TokenAppContainerNumber)
     }
 }
 

@@ -28,6 +28,17 @@ fn print_token_info(tok: &Token) -> Result<()> {
     println!("ui access         = {}", tok.ui_access()?);
     println!("app container     = {}", tok.is_app_container()?);
 
+    // App-container details (if present).
+    match tok.app_container_sid()? {
+        Some(ac_sid) => {
+            let (ac_name, ac_domain) = ac_sid.account().unwrap_or_default();
+            println!("app container SID = {ac_sid} ({ac_domain}\\{ac_name})");
+        }
+        None => println!("app container SID = (none)"),
+    }
+
+    println!("app container #   = {}", tok.app_container_number()?);
+
     let owner = tok.owner()?;
     let (owner_name, owner_domain) = owner.account().unwrap_or_default();
     println!("owner             = {owner} ({owner_domain}\\{owner_name})");
