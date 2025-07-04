@@ -41,14 +41,17 @@ use windows::{
             LookupPrivilegeValueW, PSID, SE_PRIVILEGE_ENABLED, SE_PRIVILEGE_REMOVED,
             SECURITY_NT_AUTHORITY, SID_IDENTIFIER_AUTHORITY, SID_NAME_USE, SecurityImpersonation,
             TOKEN_ACCESS_MASK, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_GROUPS,
-            TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
-            TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE, TOKEN_USER, TokenElevation,
-            TokenElevationType, TokenGroups, TokenIntegrityLevel, TokenLinkedToken,
-            TokenPrivileges, TokenUser, WELL_KNOWN_SID_TYPE,
+            TOKEN_INFORMATION_CLASS, TOKEN_LINKED_TOKEN, TOKEN_MANDATORY_LABEL, TOKEN_PRIVILEGES,
+            TOKEN_PRIVILEGES_ATTRIBUTES, TOKEN_TYPE, TOKEN_USER, TokenCapabilities,
+            TokenDeviceGroups, TokenElevation, TokenElevationType, TokenGroups,
+            TokenHasRestrictions, TokenIntegrityLevel, TokenIsAppContainer, TokenLinkedToken,
+            TokenLogonSid, TokenOwner, TokenPrimary, TokenPrimaryGroup, TokenPrivileges,
+            TokenRestrictedDeviceGroups, TokenRestrictedSids, TokenType, TokenUser,
+            TokenVirtualizationAllowed, TokenVirtualizationEnabled, WELL_KNOWN_SID_TYPE,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
-    core::{BOOL, Error, PCWSTR, PWSTR, Result},
+    core::{BOOL, Error, HSTRING, PCWSTR, PWSTR, Result},
 };
 
 #[inline]
@@ -195,21 +198,14 @@ impl Token {
         }
     }
 
-    /// Enumerate group SIDs.
-    pub fn groups(&self) -> Result<Vec<Group>> {
+    fn groups_of(&self, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<Group>> {
         unsafe {
             let mut len = 0u32;
-            buffer_probe(GetTokenInformation(
-                self.handle,
-                TokenGroups,
-                None,
-                0,
-                &mut len,
-            ))?;
+            buffer_probe(GetTokenInformation(self.handle, class, None, 0, &mut len))?;
             let mut buf = vec![0u8; len as usize];
             GetTokenInformation(
                 self.handle,
-                TokenGroups,
+                class,
                 Some(buf.as_mut_ptr() as *mut c_void),
                 len,
                 &mut len,
@@ -227,6 +223,36 @@ impl Token {
                 })
                 .collect()
         }
+    }
+
+    /// Enumerate group SIDs (`TokenGroups`).
+    pub fn groups(&self) -> Result<Vec<Group>> {
+        self.groups_of(TokenGroups)
+    }
+
+    /// Enumerate capability SIDs (`TokenCapabilities`).
+    pub fn capabilities(&self) -> Result<Vec<Group>> {
+        self.groups_of(TokenCapabilities)
+    }
+
+    /// Enumerate the logon SID (`TokenLogonSid`). Typically returns a single entry.
+    pub fn logon_sid(&self) -> Result<Vec<Group>> {
+        self.groups_of(TokenLogonSid)
+    }
+
+    /// Enumerate restricted SIDs (`TokenRestrictedSids`).
+    pub fn restricted_sids(&self) -> Result<Vec<Group>> {
+        self.groups_of(TokenRestrictedSids)
+    }
+
+    /// Enumerate device group SIDs (`TokenDeviceGroups`).
+    pub fn device_groups(&self) -> Result<Vec<Group>> {
+        self.groups_of(TokenDeviceGroups)
+    }
+
+    /// Enumerate restricted device group SIDs (`TokenRestrictedDeviceGroups`).
+    pub fn restricted_device_groups(&self) -> Result<Vec<Group>> {
+        self.groups_of(TokenRestrictedDeviceGroups)
     }
 
     /// For filtered admin tokens, return the linked administrator token.
@@ -263,28 +289,96 @@ impl Token {
         }
     }
 
-    /// Return the token's primary user SID.
-    pub fn user(&self) -> Result<Sid> {
+    /// Helper: retrieve a DWORD token information field and map non-zero to `true`.
+    fn bool_info(&self, class: TOKEN_INFORMATION_CLASS) -> Result<bool> {
+        unsafe {
+            let mut val: u32 = 0;
+            let mut ret = 0u32;
+            GetTokenInformation(
+                self.handle,
+                class,
+                Some(&mut val as *mut _ as *mut c_void),
+                std::mem::size_of::<u32>() as u32,
+                &mut ret,
+            )?;
+            Ok(val != 0)
+        }
+    }
+
+    /// Helper: retrieve a variable-length `GetTokenInformation` buffer.
+    #[inline]
+    fn info_buffer(&self, class: TOKEN_INFORMATION_CLASS) -> Result<Vec<u8>> {
         unsafe {
             let mut len = 0u32;
-            buffer_probe(GetTokenInformation(
-                self.handle,
-                TokenUser,
-                None,
-                0,
-                &mut len,
-            ))?;
+            buffer_probe(GetTokenInformation(self.handle, class, None, 0, &mut len))?;
             let mut buf = vec![0u8; len as usize];
             GetTokenInformation(
                 self.handle,
-                TokenUser,
+                class,
                 Some(buf.as_mut_ptr() as *mut c_void),
                 len,
                 &mut len,
             )?;
-            let tu = &*(buf.as_ptr() as *const TOKEN_USER);
-            Sid::from_ptr(tu.User.Sid)
+            Ok(buf)
         }
+    }
+
+    /// Does the token have any restrictions (sandboxed / filtered token)?
+    pub fn has_restrictions(&self) -> Result<bool> {
+        self.bool_info(TokenHasRestrictions)
+    }
+
+    /// Is process virtualization allowed for this token (UAC file/registry virtualization)?
+    pub fn virtualization_allowed(&self) -> Result<bool> {
+        self.bool_info(TokenVirtualizationAllowed)
+    }
+
+    /// Is process virtualization currently enabled for this token?
+    pub fn virtualization_enabled(&self) -> Result<bool> {
+        self.bool_info(TokenVirtualizationEnabled)
+    }
+
+    /// Is this token an AppContainer token?
+    pub fn is_app_container(&self) -> Result<bool> {
+        self.bool_info(TokenIsAppContainer)
+    }
+
+    /// Is this a primary token (`TokenPrimary`) as opposed to an impersonation token?
+    pub fn is_primary(&self) -> Result<bool> {
+        unsafe {
+            let mut ty: TOKEN_TYPE = std::mem::zeroed();
+            let mut ret = 0u32;
+            GetTokenInformation(
+                self.handle,
+                TokenType,
+                Some(&mut ty as *mut _ as *mut c_void),
+                std::mem::size_of::<TOKEN_TYPE>() as u32,
+                &mut ret,
+            )?;
+            Ok(ty == TokenPrimary)
+        }
+    }
+
+    /// Return the token's primary user SID.
+    pub fn user(&self) -> Result<Sid> {
+        let buf = self.info_buffer(TokenUser)?;
+        let tu = unsafe { &*(buf.as_ptr() as *const TOKEN_USER) };
+        unsafe { Sid::from_ptr(tu.User.Sid) }
+    }
+
+    /// Return the token's primary group SID.
+    pub fn primary_group(&self) -> Result<Sid> {
+        let buf = self.info_buffer(TokenPrimaryGroup)?;
+        let tpg =
+            unsafe { &*(buf.as_ptr() as *const windows::Win32::Security::TOKEN_PRIMARY_GROUP) };
+        unsafe { Sid::from_ptr(tpg.PrimaryGroup) }
+    }
+
+    /// Return the token's owner SID.
+    pub fn owner(&self) -> Result<Sid> {
+        let buf = self.info_buffer(TokenOwner)?;
+        let to = unsafe { &*(buf.as_ptr() as *const windows::Win32::Security::TOKEN_OWNER) };
+        unsafe { Sid::from_ptr(to.Owner) }
     }
 
     /// Enumerate privileges contained in the token.
@@ -343,7 +437,7 @@ impl Token {
 
             for (i, p) in privs.iter().enumerate() {
                 *la_ptr.add(i) = LUID_AND_ATTRIBUTES {
-                    Luid: p.la.Luid,
+                    Luid: p.inner.Luid,
                     Attributes: if p.is_enabled() {
                         SE_PRIVILEGE_ENABLED
                     } else {
@@ -398,10 +492,7 @@ impl Sid {
     pub fn parse(s: &str) -> Result<Self> {
         unsafe {
             let mut psid = PSID::default();
-            // Convert Rust string to a nul-terminated UTF-16 wide string.
-            let mut wide: Vec<u16> = s.encode_utf16().collect();
-            wide.push(0); // trailing NUL
-            ConvertStringSidToSidW(PCWSTR(wide.as_ptr()), &mut psid)?;
+            ConvertStringSidToSidW(PCWSTR(HSTRING::from(s).as_ptr()), &mut psid)?;
             let len = GetLengthSid(psid);
             let slice = std::slice::from_raw_parts(psid.0 as *const u8, len as usize);
             let v = slice.to_vec();
@@ -448,8 +539,8 @@ impl Sid {
                 &mut use_ty,
             )?;
             Ok((
-                String::from_utf16_lossy(&name[..name_len as usize]),
-                String::from_utf16_lossy(&dom[..dom_len as usize]),
+                String::from_utf16(&name[..name_len as usize])?,
+                String::from_utf16(&dom[..dom_len as usize])?,
             ))
         }
     }
@@ -610,13 +701,13 @@ impl std::fmt::Display for Group {
 /// Token privilege (immutable snapshot).
 #[derive(Clone, Debug)]
 pub struct Privilege {
-    la: LUID_AND_ATTRIBUTES,
+    inner: LUID_AND_ATTRIBUTES,
 }
 
 impl Privilege {
     /// Internal helper – build from a raw `LUID_AND_ATTRIBUTES` entry.
-    pub(crate) fn from_raw(la: &LUID_AND_ATTRIBUTES) -> Self {
-        Self { la: *la }
+    pub(crate) fn from_raw(inner: &LUID_AND_ATTRIBUTES) -> Self {
+        Self { inner: *inner }
     }
 
     /// Return the privilege name (e.g. `SeDebugPrivilege`).
@@ -625,29 +716,29 @@ impl Privilege {
             let mut len = 0u32;
             buffer_probe(LookupPrivilegeNameW(
                 PCWSTR::null(),
-                &self.la.Luid,
+                &self.inner.Luid,
                 None,
                 &mut len,
             ))?;
             let mut buf = vec![0u16; len as usize];
             LookupPrivilegeNameW(
                 PCWSTR::null(),
-                &self.la.Luid,
+                &self.inner.Luid,
                 Some(PWSTR(buf.as_mut_ptr())),
                 &mut len,
             )?;
-            Ok(String::from_utf16_lossy(&buf[..len as usize]))
+            Ok(String::from_utf16(&buf[..len as usize])?)
         }
     }
 
     /// Raw attributes bitmask (see `SE_PRIVILEGE_*` constants).
     pub fn attributes(&self) -> TOKEN_PRIVILEGES_ATTRIBUTES {
-        self.la.Attributes
+        self.inner.Attributes
     }
 
     /// Is this privilege currently enabled?
     pub fn is_enabled(&self) -> bool {
-        self.la.Attributes.contains(SE_PRIVILEGE_ENABLED)
+        self.inner.Attributes.contains(SE_PRIVILEGE_ENABLED)
     }
 
     /// Construct a privilege specification by name and desired enabled state.
@@ -656,13 +747,14 @@ impl Privilege {
         unsafe {
             // Resolve the privilege's LUID.
             let mut luid = LUID::default();
-            let mut wide: Vec<u16> = name.encode_utf16().collect();
-            wide.push(0); // trailing NUL
-
-            LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(wide.as_ptr()), &mut luid)?;
+            LookupPrivilegeValueW(
+                PCWSTR::null(),
+                PCWSTR(HSTRING::from(name).as_ptr()),
+                &mut luid,
+            )?;
 
             Ok(Self {
-                la: LUID_AND_ATTRIBUTES {
+                inner: LUID_AND_ATTRIBUTES {
                     Luid: luid,
                     Attributes: if enable {
                         SE_PRIVILEGE_ENABLED
@@ -690,7 +782,7 @@ impl Privilege {
 impl std::fmt::Display for Privilege {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let name = self.name().unwrap_or_else(|_| {
-            let luid = self.la.Luid;
+            let luid = self.inner.Luid;
             format!("LUID({:?},{:?})", luid.HighPart, luid.LowPart)
         });
         let state = if self.is_enabled() {
