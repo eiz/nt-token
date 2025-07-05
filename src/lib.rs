@@ -59,7 +59,6 @@ use windows::{
     core::{BOOL, Error, HSTRING, PCWSTR, PWSTR, Result},
 };
 
-#[inline]
 fn buffer_probe(res: Result<()>) -> Result<()> {
     match res {
         Ok(()) => Ok(()),
