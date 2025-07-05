@@ -21,3 +21,6 @@ windows = { version = "0.61", features = [
      "Win32_System_Memory",
      "Win32_System_SystemServices",
 ] }
+
+[dev-dependencies]
+once_cell = "1"

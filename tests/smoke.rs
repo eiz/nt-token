@@ -7,6 +7,11 @@ use windows::{
     core::Result,
 };
 
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
+static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
 // Simple smoke-test: open the current process token and print some data. If
 // anything panics or returns an `Err`, the test will fail.
 fn print_token_info(tok: &Token) -> Result<()> {
@@ -121,6 +126,7 @@ fn elevated_token(original: &Token) -> Result<OwnedToken> {
 
 #[test]
 fn current_process_token_info() -> Result<()> {
+    let _guard = TEST_MUTEX.lock().unwrap();
     let tok = OwnedToken::from_current_process(TOKEN_QUERY | TOKEN_DUPLICATE)?;
     let impersonation = tok.duplicate(
         TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES,
@@ -148,6 +154,7 @@ fn current_process_token_info() -> Result<()> {
 
 #[test]
 fn restricted_token() -> Result<()> {
+    let _guard = TEST_MUTEX.lock().unwrap();
     let tok = OwnedToken::from_current_process(TOKEN_QUERY | TOKEN_DUPLICATE)?;
     let tok = elevated_token(&tok)?;
     let restricted = tok.create_restricted_token(
