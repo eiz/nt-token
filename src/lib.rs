@@ -1,3 +1,11 @@
+//  _   _ _______     _______          _
+// | \ | |_   _\ \   / /_   _|__   ___| |_ ___  _ __ ___
+// |  \| | | |  \ \ / /  | |/ _ \ / __| __/ _ \| '__/ _ \
+// | |\  | | |   \ V /   | | (_) | (__| || (_) | | |  __/
+// |_| \_| |_|    \_/    |_|\___/ \___|\__\___/|_|  \___|
+//
+//             Windows NT Token Utilities – since 2025
+// --------------------------------------------------------
 //! # nt_token
 //!
 //! Memory-safe, ergonomic helpers for working with Windows access tokens and security identifiers (SIDs) in Rust.
