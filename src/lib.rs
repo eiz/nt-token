@@ -631,7 +631,7 @@ impl Sid {
         unsafe {
             let mut psid = PSID::default();
             let hstring = HSTRING::from(s);
-            ConvertStringSidToSidW(PCWSTR(hstring.as_ptr()), &mut psid)?;
+            ConvertStringSidToSidW(&hstring, &mut psid)?;
             let len = GetLengthSid(psid);
             let slice = std::slice::from_raw_parts(psid.0 as *const u8, len as usize);
             let v = slice.to_vec();
@@ -907,7 +907,7 @@ impl Privilege {
             // Resolve the privilege's LUID.
             let mut luid = LUID::default();
             let hstring = HSTRING::from(name);
-            LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(hstring.as_ptr()), &mut luid)?;
+            LookupPrivilegeValueW(PCWSTR::null(), &hstring, &mut luid)?;
 
             Ok(Self {
                 inner: LUID_AND_ATTRIBUTES {
