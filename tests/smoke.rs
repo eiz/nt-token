@@ -26,7 +26,7 @@ fn print_token_info(tok: &Token) -> Result<()> {
     } else {
         println!("is admin          = (failed to check)");
     }
-    println!("IL RID            = 0x{:x}", tok.integrity_level()?);
+    println!("IL SID            = {}", tok.integrity_level()?);
     println!("has restrictions  = {}", tok.has_restrictions()?);
     println!("virt allowed      = {}", tok.virtualization_allowed()?);
     println!("virt enabled      = {}", tok.virtualization_enabled()?);

@@ -25,7 +25,7 @@
 //! # fn main() -> windows::core::Result<()> {
 //! let token = OwnedToken::from_current_process(TOKEN_QUERY)?;
 //! println!("elevated         = {}", token.is_elevated()?);
-//! println!("integrity level  = 0x{:x}", token.integrity_level()?);
+//! println!("integrity level  = {}", token.integrity_level()?);
 //!
 //! for g in token.groups()? {
 //!     println!("group → {g}");
@@ -184,8 +184,8 @@ impl Token {
         }
     }
 
-    /// Return integrity‑level RID (e.g. `0x1000 == medium`).
-    pub fn integrity_level(&self) -> Result<u32> {
+    /// Return the integrity-level SID.
+    pub fn integrity_level(&self) -> Result<Sid> {
         unsafe {
             let mut len = 0u32;
             buffer_probe(GetTokenInformation(
@@ -204,7 +204,7 @@ impl Token {
                 &mut len,
             )?;
             let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
-            Sid::from_ptr(label.Label.Sid)?.rid()
+            Sid::from_ptr(label.Label.Sid)
         }
     }
 
@@ -630,7 +630,8 @@ impl Sid {
     pub fn parse(s: &str) -> Result<Self> {
         unsafe {
             let mut psid = PSID::default();
-            ConvertStringSidToSidW(PCWSTR(HSTRING::from(s).as_ptr()), &mut psid)?;
+            let hstring = HSTRING::from(s);
+            ConvertStringSidToSidW(PCWSTR(hstring.as_ptr()), &mut psid)?;
             let len = GetLengthSid(psid);
             let slice = std::slice::from_raw_parts(psid.0 as *const u8, len as usize);
             let v = slice.to_vec();
@@ -905,11 +906,8 @@ impl Privilege {
         unsafe {
             // Resolve the privilege's LUID.
             let mut luid = LUID::default();
-            LookupPrivilegeValueW(
-                PCWSTR::null(),
-                PCWSTR(HSTRING::from(name).as_ptr()),
-                &mut luid,
-            )?;
+            let hstring = HSTRING::from(name);
+            LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(hstring.as_ptr()), &mut luid)?;
 
             Ok(Self {
                 inner: LUID_AND_ATTRIBUTES {
